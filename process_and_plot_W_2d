@@ -1,0 +1,499 @@
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.colors
+import csv
+
+from project_functions import getGoodClusterIdsAndDepths
+from procSpikeGLX.postPhyPipeline import *
+
+
+def adjust_division(W, n, cell_list):
+    '''
+    adjust the division into 2 grops
+    this is an assisting function to complement the process of function divide_to_E_I and divide_to_GC_S2.
+    in the process colums of the connectivity matrix are replaced to divide to 2 distinct groups, this dunction adjusts the mislocated connection values.
+    '''
+    for i in range(0, n):
+        if cell_list[i] != i:
+            for j in range(i, n):
+                if cell_list[j] == i:
+                    tmp = j
+                    break
+
+            tmp_i = []
+            for j in range(0, n):
+                tmp_i.append(W[i][j])
+
+            for j in range(0, n):
+                W[i][j] = W[tmp][j]
+            for j in range(0, n):
+                W[tmp][j] = tmp_i[j]
+    return W
+
+def divide_to_E_I(W_file, n, function='return'):
+    '''
+    this function reads csv table of connectivity matrix, transposes it, and then compares each row (the column of the original matrix) to findf it is more excitatory or inhibitory.
+    It then moves inhibitory links to the end of the matrix, and also adjusting the new index of that row in the column dimention.
+    Finally, it transposed the matrix back and returns it together with the border index, or writes it to csv file.
+    :param W_file:
+    :param n:
+    :param function:
+    :return:
+    '''
+    W = [[0 for i in range(n)] for j in range(n)]
+    # read W file
+    with open(W_file, 'r') as f:
+        reader = csv.reader(f)
+
+        i = 0
+        for row in reader:
+            for j in range(0, n):
+                W[i][j] = float(row[j])
+            i += 1
+
+    # transpose W list
+    W_t = [list(x) for x in zip(*W)]
+    W_e_t = []
+    W_i_t = []
+    e_cell_list = []
+    i_cell_list = []
+    cell_list = []
+    e_i_rate = [0 for i in range(0, n)]
+    for i in range(0, n):
+        i_rate = 0
+        e_rate = 0
+        for j in range(0, n):
+            if W_t[i][j] > 0:
+                e_rate += 1
+            elif W_t[i][j] < 0:
+                i_rate += 1
+        if (e_rate - i_rate) < 0:
+            W_i_t.append(W_t[i])
+            i_cell_list.append(i)
+        else:
+            W_e_t.append(W_t[i])
+            e_cell_list.append(i)
+    # W_e_t and W_i_t are excitatory and inhibitory parts of the matrix , each containing x rows of n values.
+    W_d_t = W_e_t + W_i_t
+
+    cell_list = e_cell_list + i_cell_list
+    W = [list(x) for x in zip(*W_d_t)]
+
+    for i in range(0, n):
+        if cell_list[i] != i:
+            for j in range(i, n):
+                if cell_list[j] == i:
+                    tmp = j
+                    break
+
+            tmp_i = []
+            for j in range(0, n):
+                tmp_i.append(W[i][j])
+
+            for j in range(0, n):
+                W[i][j] = W[tmp][j]
+            for j in range(0, n):
+                W[tmp][j] = tmp_i[j]
+
+    if function == 'write':
+        W_d_f = open(f"sorted_{W_file}", 'w')
+        for i in range(0, n):
+            for j in range(0, n):
+                if W[i][j] == 0:
+                    W[i][j] = int(W[i][j])
+                W_d_f.write(str(W[i][j]))
+                if j == n - 1:
+                    W_d_f.write('\n')
+                else:
+                    W_d_f.write(', ')
+
+        W_d_f.close()
+    else:
+        border_E_I = len(e_cell_list) - 1  # =number of units / columns with excitatory links
+        return W, [border_E_I]
+
+
+def divide_to_E_I_and_GC_S2(W_file, n, depths, thrd, function='return'):
+    global list
+    W = [[0 for i in range(n)] for j in range(n)]
+    # read W file
+    with open(W_file, 'r') as f:
+        reader = csv.reader(f)
+
+        i = 0
+        for row in reader:
+            for j in range(0, n):
+                W[i][j] = float(row[j])
+            i += 1
+    #transpose W
+    W_t = [list(x) for x in zip(*W)]
+    W_e_gc_t = []
+    W_e_s2_t = []
+    W_i_gc_t = []
+    W_i_s2_t = []
+    e_gc_cell_list = []
+    e_s2_cell_list = []
+    i_gc_cell_list = []
+    i_s2_cell_list = []
+    cell_list = []
+    for i in range(0, n):
+        i_rate = 0
+        e_rate = 0
+        depth = depths[i]
+        for j in range(0, n):
+            if W_t[i][j] > 0:
+                e_rate += 1
+            elif W_t[i][j] < 0:
+                i_rate += 1
+        if (e_rate - i_rate) < 0:
+            if depth < thrd:  # unit is in GC
+                W_i_gc_t.append(W_t[i])
+                i_gc_cell_list.append(i)
+            else:  # >= thrd \\  unit is in S2
+                W_i_s2_t.append(W_t[i])
+                i_s2_cell_list.append(i)
+        else:
+            if depth < thrd:  # unit is in GC
+                W_e_gc_t.append(W_t[i])  # add excitatory unit to top of list, inhibitory units will remain last.
+                e_gc_cell_list.append(i)
+
+            else:  # >= thrd \\  unit is in S2
+                W_e_s2_t.append(W_t[i])
+                e_s2_cell_list.append(i)
+
+    # W_e_t and W_i_t are excitatory and inhibitory parts of the matrix , each containing x rows of n values.
+    W_d_t = W_e_gc_t + W_i_gc_t + W_e_s2_t + W_i_s2_t
+    print("e_gc_cell_list:", e_gc_cell_list)
+    print("i_gc_cell_list:", i_gc_cell_list)
+    print("e_s2_cell_list:", e_s2_cell_list)
+    print("i_s2_cell_list:", i_s2_cell_list)
+
+    cell_list = e_gc_cell_list + i_gc_cell_list + e_s2_cell_list + i_s2_cell_list
+    W = [list(x) for x in zip(*W_d_t)]
+
+    for i in range(0, n):
+        if cell_list[i] != i:
+            for j in range(i, n):
+                if cell_list[j] == i:
+                    tmp = j
+                    break
+
+            tmp_i = []
+            for j in range(0, n):
+                tmp_i.append(W[i][j])
+
+            for j in range(0, n):
+                W[i][j] = W[tmp][j]
+            for j in range(0, n):
+                W[tmp][j] = tmp_i[j]
+
+    borders = [0, 0, 0]
+    borders[0] = len(e_gc_cell_list)  # =number of excitatory units / columns in GC
+    borders[1] = len(e_gc_cell_list + i_gc_cell_list)  # = number of total units / columns in GC
+    borders[2] = len(
+        e_gc_cell_list + i_gc_cell_list + e_s2_cell_list)  # = number of total units in GC + excitatory units in S2
+    cell_lists = [len(e_gc_cell_list), len(i_gc_cell_list), len(e_s2_cell_list), len(i_s2_cell_list)]
+
+    if function == 'write':
+        os.makedirs("divided_data/W", exist_ok=True)
+        # os.makedirs("W", exist_ok=True)
+        W_d_f = open(rf"divided_data/W/2_sorted_{W_file}", 'w')
+        for i in range(0, n):
+            for j in range(0, n):
+                if W[i][j] == 0:
+                    W[i][j] = int(W[i][j])
+                W_d_f.write(str(W[i][j]))
+                if j == n - 1:
+                    W_d_f.write('\n')
+                else:
+                    W_d_f.write(', ')
+
+        W_d_f.close()
+        # write params file (borders, cell_lists)
+        os.makedirs("divided_data/params", exist_ok=True)
+        params_d_f = open(rf"divided_data/params/params_{W_file}", 'w')
+        for i in range(len(borders)):
+            params_d_f.write(str(borders[i]))
+            if i == len(borders)-1:
+                params_d_f.write("\n")
+            else:
+                params_d_f.write(",")
+
+        for list in cell_lists:
+            for i, cell in enumerate(list):
+                params_d_f.write(str(cell))
+                if i == len(list)-1:
+                    params_d_f.write("\n")
+                else:
+                    params_d_f.write(",")
+        params_d_f.close()
+    else:
+        return W, borders
+
+
+def plot_W_2d(W, n, borders, trial, savefolder='null', save=False):
+    with plt.style.context('dark_background'):
+        fig, ax = plt.subplots()
+        for i in range(n):
+            x = [i] * n # x axis in each iteration is all [i]'s, scattering all connectivity values for this column
+            y = [i for i in range(n)]  # y are the indices of all rows in column [i]
+            colors = ['white'] * n
+            vals = [row[i] for row in W]  # the [i]'th value from each row in W = column [i]
+            for i, val in enumerate(vals):
+                if val > 0:
+                    colors[i] = 'magenta'
+                elif val < 0:
+                    colors[i] = 'cyan'
+                    vals[i] = abs(val)
+
+            plt.scatter(x, y, s=[val * 20 for val in vals], c=colors, marker='s', edgecolors=None)
+
+        # invert y axis
+        ax.invert_yaxis()
+        # add horizontal and vertical borders:
+        # 1. between excitatory and inhibitory parts
+        # 2. between GC and S2 areas
+        if len(borders) == 1:
+            ax.axvline(borders[0] - 0.5, color='white', linewidth=0.5)
+            ax.axhline(borders[0] - 0.5, color='white', linewidth=0.5)
+        elif len(borders) == 3:
+            ax.axvline(borders[0] - 0.5, color='white', linewidth=0.5)
+            ax.axhline(borders[0] - 0.5, color='white', linewidth=0.5)
+            ax.axvline(borders[1] - 0.5, color='white', linewidth=1)
+            ax.axhline(borders[1] - 0.5, color='white', linewidth=1)
+            ax.axvline(borders[2] - 0.5, color='white', linewidth=0.5)
+            ax.axhline(borders[2] - 0.5, color='white', linewidth=0.5)
+        # Hide X and Y axes label marks
+        ax.xaxis.set_tick_params(labelbottom=False)
+        ax.yaxis.set_tick_params(labelleft=False)
+        # Hide X and Y axes tick marks
+        ax.set_xticks([])
+        ax.set_yticks([])
+        # plotting a legend (only for 1st trial):
+        if trial == 0:
+            for psp in [0.5, 1, 5]:
+                plt.scatter([], [], c='grey', alpha=0.3, s=psp * 20, marker='s',
+                            label=str(psp) + ' mV')
+            plt.legend(scatterpoints=1, frameon=True, labelspacing=1, title='PSP', loc="upper right")
+        ax.set_aspect('equal', adjustable='box')
+        plt.title(f"{times[trial]} (h)")
+        os.makedirs(savefolder, exist_ok=True)
+        if save==True:
+            plt.savefig(os.path.join(savefolder, f"W_2d_132_YB_{times[trial]}"))
+        else:
+            plt.show()
+
+
+def divide_to_GC_S2(W_file, n, depths, thrd, function='return'):
+    '''
+    this function reads csv table of connectivity matrix, transposes it, and then divides each row / unit (the column of the original matrix) to GC or S2 based on it's depth.
+    It then moves S2 links to the end of the matrix, and also adjusting the new index of that row in the column dimention.
+    Finally, it transposed the matrix back and returns it to the user together with the border index, or writes it to csv file.
+    '''
+    W = [[0 for i in range(n)] for j in range(n)]
+    # read W file
+    with open(W_file, 'r') as f:
+        reader = csv.reader(f)
+
+        i = 0
+        for row in reader:
+            for j in range(0, n):
+                W[i][j] = float(row[j])
+            i += 1
+
+    # transpose W list
+    W_t = [list(x) for x in zip(*W)]
+    W_gc_t = []
+    W_s2_t = []
+    gc_cell_list = []
+    s2_cell_list = []
+    cell_list = []
+    for i in range(0, n):
+        depth = depths[i]
+        if depth < thrd:
+            W_gc_t.append(W_t[i])
+            gc_cell_list.append(i)
+        else:
+            W_s2_t.append(W_t[i])
+            s2_cell_list.append(i)
+    # W_gc_t and W_s2_t are GC and S2 parts of the matrix , each containing x rows of constant -n- values.
+    W_d_t = W_gc_t + W_s2_t
+
+    cell_list = gc_cell_list + s2_cell_list
+    W = [list(x) for x in zip(*W_d_t)]
+# def adjust_transpose(W, n, cell_list):
+    for i in range(0, n):
+        if cell_list[i] != i:
+            for j in range(i, n):
+                if cell_list[j] == i:
+                    tmp = j
+                    break
+
+            tmp_i = []
+            for j in range(0, n):
+                tmp_i.append(W[i][j])
+
+            for j in range(0, n):
+                W[i][j] = W[tmp][j]
+            for j in range(0, n):
+                W[tmp][j] = tmp_i[j]
+
+    if function == 'write':
+        W_d_f = open(f"sorted_{W_file}", 'w')
+
+        for i in range(0, n):
+            for j in range(0, n):
+                if W[i][j] == 0:
+                    W[i][j] = int(W[i][j])
+                W_d_f.write(str(W[i][j]))
+                if j == n - 1:
+                    W_d_f.write('\n')
+                else:
+                    W_d_f.write(', ')
+
+        W_d_f.close()
+    else:
+        border_gc_s2 = len(gc_cell_list) - 1  # =number of GC units / columns
+        return W, border_gc_s2
+
+def calc_connectivity(W, borders, n):
+    # find indices for each cell group in the new sorted matrix.
+    gc = range(0, borders[1])
+    s2 = range(borders[1], n)
+    def replace_nan(list):
+        new_list = np.array(list)
+        new_list[np.isnan(new_list)] = 0
+        return list(new_list)
+    df = pd.DataFrame(W)
+    # format: [df[df[cols].loc[rows] | condition].sum/count().sum()
+    tot_con_e = [df[df>0].count().sum(), round(df[df>0].sum().sum()/df[df>0].count().sum(), 3)]
+    tot_con_i = [df[df<0].count().sum(), round(df[df<0].sum().sum()/df[df<0].count().sum(), 3)]
+    tot_con = [tot_con_e[0]+tot_con_i[0], round(tot_con_e[1] + abs(tot_con_i[1]), 3)]
+    gc_con_e = [df[df[gc].loc[gc]>0].count().sum(), round(df[df[gc].loc[gc]>0].sum().sum()/df[df[gc].loc[gc]>0].count().sum(), 3)]
+    gc_con_i = [df[df[gc].loc[gc]<0].count().sum(), round(df[df[gc].loc[gc]<0].sum().sum()/df[df[gc].loc[gc]<0].count().sum(), 3)]
+    gc_con = [gc_con_e[0]+gc_con_i[0], round(gc_con_e[1] + abs(gc_con_i[1]), 3)]
+    s2_con_e = [df[df[s2].loc[s2] > 0].count().sum(),
+                round(df[df[s2].loc[s2] > 0].sum().sum() / df[df[s2].loc[s2] > 0].count().sum(), 3)]
+    s2_con_i = [df[df[s2].loc[s2] < 0].count().sum(),
+                round(df[df[s2].loc[s2] < 0].sum().sum() / df[df[s2].loc[s2] < 0].count().sum(), 3)]
+    s2_con = [s2_con_e[0]+s2_con_i[0], round(s2_con_e[1] + abs(s2_con_i[1]), 3)]
+    diff_con_e = [df[df[gc].loc[s2] > 0].count().sum() + df[df[s2].loc[gc] > 0].count().sum(),
+                   round((df[df[gc].loc[s2] > 0].sum().sum() + df[df[s2].loc[gc] > 0].sum().sum()) /
+                         (df[df[gc].loc[s2] > 0].count().sum() + df[df[s2].loc[gc] > 0].count().sum()), 3)]
+    diff_con_i = [(df[df[gc].loc[s2] < 0].count().sum() + df[df[s2].loc[gc] < 0].count().sum()),
+                   round((df[df[gc].loc[s2] < 0].sum().sum() + df[df[s2].loc[gc] < 0].sum().sum()) /
+                         ((df[df[gc].loc[s2] < 0].count().sum() + df[df[s2].loc[gc] < 0].count().sum()) + 0.001), 3)]
+    diff_con = [diff_con_e[0] + diff_con_i[0], round(diff_con_e[1] + abs(diff_con_i[1])), 3]
+    gc_s2_con_e = [df[df[gc].loc[s2] > 0].count().sum(),
+                   round((df[df[gc].loc[s2] > 0].sum().sum()) / (df[df[gc].loc[s2] > 0].count().sum() + 0.001), 3)]
+    gc_s2_con_i = [df[df[gc].loc[s2] < 0].count().sum(),
+                   round(df[df[gc].loc[s2] < 0].sum().sum() / (df[df[gc].loc[s2] < 0].count().sum() + 0.001), 3)]
+    gc_s2_con = [gc_s2_con_e[0] + gc_s2_con_i[0], round(gc_s2_con_e[1] + abs(gc_s2_con_i[1])), 3]
+    s2_gc_con_e = [df[df[s2].loc[gc] > 0].count().sum(),
+                   round(df[df[s2].loc[gc] > 0].sum().sum() / (df[df[s2].loc[gc] > 0].count().sum() + 0.001), 3)]
+    s2_gc_con_i = [df[df[s2].loc[gc] < 0].count().sum(),
+                   round(df[df[s2].loc[gc] < 0].sum().sum() / (df[df[s2].loc[gc] < 0].count().sum() + 0.001), 3)]
+    s2_gc_con = [s2_gc_con_e[0] + s2_gc_con_i[0], round(s2_gc_con_e[1] + abs(s2_gc_con_i[1])), 3]
+
+    #changed needed:
+    #option 1: create replace_nan function and inset it before every round() - denominator
+    #option 2:
+    #1. replace variable names with list indices - params[0][0] and so on instead of (example) gc_con_i
+    #2. don't include tots, they will be calculated later
+    #3. iterate through all items in params list, replace nan with 0 in
+    #4. calculate tots and return all values
+
+    con_params_df = pd.DataFrame({'number_of_connections': tot_con[0],'mean_connectivity_strength_total':tot_con[1],
+                                  'num_con_e':tot_con_e[0], 'mean_str_e':tot_con_e[1], 'num_con_i':tot_con_i[0],
+                                  'mean_str_i':tot_con_i[1], 'num_con_gc':gc_con[0], 'mean_str_gc':gc_con[1],
+                                  'num_con_gc_e':gc_con_e[0], 'mean_str_gc_e':gc_con_e[1], 'num_con_gc_i':gc_con_i[0],
+                                  'mean_str_gc_i':gc_con_i[1], 'num_con_s2':s2_con[0], 'mean_str_s2':s2_con[1],
+                                  'num_con_s2_e':s2_con_e[0], 'mean_str_s2_e':s2_con_e[1], 'num_con_s2_i':s2_con_i[0],
+                                  'mean_str_s2_i':s2_con_i[1],'num_con_diff':diff_con[0], 'mean_str_diff':diff_con[1],
+                                  'num_con_diff_e':diff_con_e[0], 'mean_str_diff_e':diff_con_e[1], 'num_con_diff_i':diff_con_i[0],
+                                  'mean_str_diff_i':diff_con_i[1], 'num_con_gc_s2':gc_s2_con[0], 'mean_str_gc_s2':gc_s2_con[1],
+                                  'num_con_gc_s2_e':gc_s2_con_e[0], 'mean_str_gc_s2_e':gc_s2_con_e[1], 'num_con_gc_s2_i':gc_s2_con_i[0],
+                                  'mean_str_gc_s2_i':gc_s2_con_i[1], 'num_con_s2_gc': s2_gc_con[0], 'mean_str_s2_gc': s2_gc_con[1],
+                                  'num_con_s2_gc_e': s2_gc_con_e[0], 'mean_str_s2_gc_e': s2_gc_con_e[1],
+                                  'num_con_s2_gc_i': s2_gc_con_i[0], 'mean_str_s2_gc_i': s2_gc_con_i[1]}, index=[0])
+    return con_params_df
+
+    # return [tot_con_e, tot_con_i, tot_con, gc_con_e, gc_con_i, gc_con, s2_con_e, s2_con_i, s2_con, diff_con_e, diff_con_i, diff_con]
+
+
+if __name__ == "__main__":
+    # path = r"C:\Users\Yuval\Desktop\Yuval_project\data_analysis"
+    baseDir = r'G:\GLXData\ND7'
+    sesName = 'ND7_post'
+    g = '0'
+    imec = '0'
+    ksdir = 'kilosort3'
+
+    dp = combineToGLXData(baseDir, sesName, g, imec)
+    # dpks = combineToGLX_KS_path(baseDir, sesName, g, imec, ksdir)
+    dpks = r'C:\Users\Yuval\Desktop\Yuval_project\data_analysis\kilosort_data'
+    gu = getGoodUnits(dpks)
+    gudata = getUnitsData(dpks, gu)
+    gu_id = gudata.reset_index(drop=True)["cluster_id"].tolist()
+
+    path_to_W = r'C:\Users\Yuval\Desktop\Yuval_project\data_analysis\ND7'
+    os.chdir(path_to_W)
+    files = ['W_py_T0_7200_132_AM2', 'W_py_T7200_14400_132_AM2',
+             'W_py_T14400_21600_132_AM2', 'W_py_T21600_28800_132_AM2',
+             'W_py_T28800_36000_132_AM2', 'W_py_T36000_43200_132_AM2',
+             'W_py_T43200_50400_132_AM2', 'W_py_T50400_57600_132_AM2']
+
+
+    times = ['00-02', '02-04', '04-06', '06-08', '08-10', '10-12', '12-14', '14-16']
+
+
+    depths = gudata.reset_index(drop=True).depth.tolist()
+    n = len(gu) # cellNum
+    thrd = 1200
+
+
+    # divide_to_E_I_and_GC_S2(f"{files[0]}.csv", n, depths, thrd, function='write')
+    # // use this line in the loop to write connectivity parameters and sorted W to folder
+
+
+
+    # #this part of the script shows / saves the re-organized connectivity matrix plots for dataset in 'files'
+    # savefolder = "2d_plot_d2_i_e_and_gc_s2" #"2d_connect_plots"
+    #
+    # for i, W_file in enumerate(files):
+    #     W_res, borders = divide_to_E_I_and_GC_S2(f"{W_file}.csv", n, depths, thrd)
+    #     plot_W_2d(W_res, n, borders, i, save=True, savefolder=savefolder)
+
+
+    # # this part of the script is used to calculate connectivity data for the dataset in 'files':
+    
+    # files = ['W_py_T0_7200_132_AM2', 'W_py_T7200_14400_132_AM2',
+    #          'W_py_T14400_21600_132_AM2', 'W_py_T21600_28800_132_AM2',
+    #          'W_py_T28800_36000_132_AM2', 'W_py_T36000_43200_132_AM2',
+    #          'W_py_T43200_50400_132_AM2', 'W_py_T50400_57600_132_AM2']
+    # times = ['00-02', '02-04', '04-06', '06-08', '08-10', '10-12', '12-14', '14-16']
+    # depths = gudata.reset_index(drop=True).depth.tolist()
+    # n = len(gu) # cellNum
+    # thrd = 1200
+    # # borders = []
+    # temp_df = pd.DataFrame()
+    # con_params_df = pd.DataFrame()
+    # for i, W_file in enumerate(files):
+    #     W_d, borders = divide_to_E_I_and_GC_S2(f"{W_file}.csv", n, depths, thrd)
+    #     print(borders)
+    #     temp_df = calc_connectivity(W_d, borders, n)
+    #     con_params_df = con_params_df.append(temp_df)
+    # # con_params_df['times'] = times
+    # # con_params_df['index_column'] = con_params_df.times
+    # new_index = pd.Index(times)
+    # con_params_df = con_params_df.set_index(new_index)
+    # print(con_params_df.to_string())
+    # con_params_df.to_csv(f"results_ND7_YB_border_{borders[1]}.csv")
+
+
+
+
+
+
