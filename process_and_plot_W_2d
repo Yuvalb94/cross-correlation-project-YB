@@ -8,7 +8,6 @@ import csv
 from project_functions import getGoodClusterIdsAndDepths
 from procSpikeGLX.postPhyPipeline import *
 
-
 def adjust_division(W, n, cell_list):
     '''
     adjust the division into 2 grops
